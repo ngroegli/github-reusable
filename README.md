@@ -1,6 +1,8 @@
 # GitHub Actions - reusable
 
-This private repository stores reusable GitHub Actions workflows and composite actions used across projects.
+This repository stores reusable GitHub Actions workflows and composite actions used across projects.
+
+> **Repository must be public.** GitHub only allows cross-repository `workflow_call` to reusable workflows in public repositories (or within the same paid organisation). If this repository is private, callers in other repositories will fail with `workflow was not found`. Make this repository public via Settings before using the workflows from other repos.
 
 ## Available workflows
 
