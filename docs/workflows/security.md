@@ -41,6 +41,16 @@ permissions:
 
 The **caller workflow** must grant the same permissions to its `GITHUB_TOKEN`.
 
+## Repository visibility requirement
+
+GitHub only allows cross-repository `workflow_call` access to reusable workflows in **public** repositories (or within the same organisation on a paid plan). If `github-reusable` is private, callers in other repositories will receive:
+
+```
+workflow was not found
+```
+
+To resolve this, make `github-reusable` public: **Settings → General → Danger Zone → Change repository visibility → Make public**. The workflows contain no secrets or sensitive logic — they are safe to be public.
+
 ## How to call from another repository
 
 Create `.github/workflows/security.yml` in your repository:
