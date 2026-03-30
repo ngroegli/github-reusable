@@ -1,0 +1,229 @@
+name: Release - reusable publish (callable)
+
+# Called by other repositories on a tag push, e.g.:
+#
+#   jobs:
+#     release:
+#       uses: ngroegli/github-reusable/.github/workflows/release-reusable.yml@main
+#       with:
+#         docker_image: ghcr.io/my-org/my-app
+#       secrets:
+#         npm_token: ${{ secrets.NPM_TOKEN }}
+#         pypi_token: ${{ secrets.PYPI_TOKEN }}
+#         docker_username: ${{ secrets.DOCKER_USERNAME }}
+#         docker_password: ${{ secrets.DOCKER_PASSWORD }}
+
+on:
+  workflow_call:
+    inputs:
+      docker_image:
+        description: >
+          Full Docker image name to build and push, e.g. "ghcr.io/org/app".
+          The tag is derived from the triggering ref (e.g. v1.2.3).
+          Defaults to ghcr.io/<calling-repo>.
+        required: false
+        type: string
+        default: ''
+      node_version:
+        description: Node.js version to use for npm publish.
+        required: false
+        type: string
+        default: '20'
+      python_version:
+        description: Python version to use for PyPI publish.
+        required: false
+        type: string
+        default: '3.12'
+    secrets:
+      npm_token:
+        description: npm access token (NPM_TOKEN). Required for npm publish.
+        required: false
+      pypi_token:
+        description: PyPI API token (PYPI_TOKEN). Required for PyPI publish.
+        required: false
+      docker_username:
+        description: Docker registry username. Required for Docker publish.
+        required: false
+      docker_password:
+        description: Docker registry password or token. Required for Docker publish.
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # Detect which artifact types exist in the calling repository.
+  # Outputs drive the three parallel publish jobs below.
+  # ------------------------------------------------------------------
+  detect:
+    name: Detect project types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      is_node: ${{ steps.detect.outputs.node }}
+      is_python: ${{ steps.detect.outputs.python }}
+      is_docker: ${{ steps.detect.outputs.docker }}
+      version: ${{ steps.detect.outputs.version }}
+      docker_image: ${{ steps.detect.outputs.docker_image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect project types and resolve version
+        id: detect
+        env:
+          INPUT_DOCKER_IMAGE: ${{ inputs.docker_image }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          node=false
+          python=false
+          docker=false
+
+          [ -f package.json ] && node=true
+          # Only treat as publishable Python if it has a build descriptor
+          [ -f pyproject.toml ] || [ -f setup.py ] && python=true
+          [ -f Dockerfile ] && docker=true
+
+          # Strip refs/tags/ prefix
+          version="${REF#refs/tags/}"
+
+          # Resolve Docker image name: caller input > default to ghcr.io/<repo>
+          if [ -n "$INPUT_DOCKER_IMAGE" ]; then
+            docker_image="$INPUT_DOCKER_IMAGE"
+          else
+            docker_image="ghcr.io/${REPO}"
+          fi
+
+          echo "node=$node"         >> "$GITHUB_OUTPUT"
+          echo "python=$python"     >> "$GITHUB_OUTPUT"
+          echo "docker=$docker"     >> "$GITHUB_OUTPUT"
+          echo "version=$version"   >> "$GITHUB_OUTPUT"
+          echo "docker_image=$docker_image" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # npm publish — only runs when package.json exists.
+  # ------------------------------------------------------------------
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-24.04
+    needs: detect
+    if: needs.detect.outputs.is_node == 'true'
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
+        run: npm publish --access public
+
+  # ------------------------------------------------------------------
+  # PyPI publish — only runs when pyproject.toml or setup.py exists.
+  # Uses the trusted publisher model via OIDC when available,
+  # falling back to TWINE_PASSWORD (PYPI_TOKEN).
+  # ------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-24.04
+    needs: detect
+    if: needs.detect.outputs.is_python == 'true'
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ inputs.python_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Build package
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.pypi_token }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload dist/*
+
+  # ------------------------------------------------------------------
+  # Docker build and push — only runs when Dockerfile exists.
+  # Tags the image with both the version tag and "latest".
+  # ------------------------------------------------------------------
+  publish-docker:
+    name: Build and push Docker image
+    runs-on: ubuntu-24.04
+    needs: detect
+    if: needs.detect.outputs.is_docker == 'true'
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to registry
+        env:
+          DOCKER_USERNAME: ${{ secrets.docker_username }}
+          DOCKER_PASSWORD: ${{ secrets.docker_password }}
+        run: |
+          echo "$DOCKER_PASSWORD" | docker login \
+            -u "$DOCKER_USERNAME" \
+            --password-stdin
+
+      - name: Build and push
+        env:
+          IMAGE: ${{ needs.detect.outputs.docker_image }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          docker build \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            .
+          docker push "${IMAGE}:${VERSION}"
+          docker push "${IMAGE}:latest"
+
+  # ------------------------------------------------------------------
+  # GitHub Release — runs after all publish jobs (pass or skip).
+  # Creates the release page and attaches any dist/ artefacts.
+  # ------------------------------------------------------------------
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [detect, publish-npm, publish-pypi, publish-docker]
+    if: always() && needs.detect.result == 'success'
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artefacts (if any)
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+        continue-on-error: true
+
+      - name: Create GitHub Release
+        # softprops/action-gh-release pinned to latest stable commit
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda
+        with:
+          tag_name: ${{ needs.detect.outputs.version }}
+          generate_release_notes: true
+          files: dist/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

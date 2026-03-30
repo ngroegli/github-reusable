@@ -1,0 +1,296 @@
+name: Security - reusable scan (callable)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  issues: write
+  security-events: read
+
+jobs:
+  # ------------------------------------------------------------
+  # CodeQL: static code analysis for JavaScript and Python.
+  # Runs in parallel with secret-scan and dependency scans.
+  # ------------------------------------------------------------
+  codeql:
+    name: CodeQL analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: javascript,python
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v2
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+
+  # ------------------------------------------------------------
+  # Gitleaks: detect secrets committed to the repository.
+  # Uses the CLI directly (not the action) for full flag control
+  # and to avoid the unsupported 'args' action input.
+  # ------------------------------------------------------------
+  secret-scan:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+
+      - name: Run gitleaks
+        id: gitleaks
+        run: |
+          gitleaks detect --source . \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --exit-code 0
+          if [ -s gitleaks-report.json ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo '[]' > gitleaks-report.json
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+
+  # ------------------------------------------------------------
+  # npm audit: dependency vulnerability scan for Node projects.
+  # Skipped automatically when no package.json is present.
+  # ------------------------------------------------------------
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect package.json
+        id: detect_node
+        run: |
+          if [ -f package.json ]; then
+            echo "node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.detect_node.outputs.node == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        if: steps.detect_node.outputs.node == 'true'
+        run: npm ci --no-audit
+
+      - name: Run npm audit
+        if: steps.detect_node.outputs.node == 'true'
+        run: npm audit --json > npm-audit.json || true
+
+      - name: Ensure report exists
+        if: steps.detect_node.outputs.node != 'true'
+        run: echo '{}' > npm-audit.json
+
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: npm-audit.json
+
+  # ------------------------------------------------------------
+  # pip-audit: dependency vulnerability scan for Python projects.
+  # Uses pip-audit (PyPA / Google) instead of safety because:
+  #   - pip-audit is fully free and open source (Apache 2.0)
+  #   - Backed by the OSV database and PyPI Advisory DB
+  #   - safety v3+ requires a paid API key for full results
+  # Skipped automatically when no Python indicators exist.
+  # ------------------------------------------------------------
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Python project
+        id: detect_py
+        run: |
+          if [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -f setup.py ]; then
+            echo "python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "python=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Python
+        if: steps.detect_py.outputs.python == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        if: steps.detect_py.outputs.python == 'true'
+        run: python -m pip install --upgrade pip pip-audit
+
+      - name: Run pip-audit
+        if: steps.detect_py.outputs.python == 'true'
+        run: |
+          pip-audit --format json --output pip-audit.json || true
+
+      - name: Ensure report exists
+        if: steps.detect_py.outputs.python != 'true'
+        run: echo '{"dependencies":[]}' > pip-audit.json
+
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit.json
+
+  # ------------------------------------------------------------
+  # Aggregate all scanner results, create one issue per finding
+  # (deduplicating by title), post a summary issue, and fail
+  # the workflow when any findings are present.
+  # ------------------------------------------------------------
+  create-issues-and-fail:
+    name: Report findings and fail
+    runs-on: ubuntu-24.04
+    needs: [codeql, secret-scan, npm-audit, pip-audit]
+    if: always()
+    timeout-minutes: 15
+    steps:
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create issues from findings and fail if any
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: https://api.github.com/repos/${{ github.repository }}
+        shell: sh
+        run: |
+          set -eu
+          token="$GITHUB_TOKEN"
+          api="$API_URL"
+          count_file=$(mktemp)
+          echo 0 > "$count_file"
+          urls_file=$(mktemp)
+
+          # Helper: create one issue if title not already open; append url to urls_file
+          create_issue() {
+            _title="$1"
+            _body="$2"
+            _labels="$3"
+            _existing=$(curl -sf \
+              -H "Authorization: token $token" \
+              -H "Accept: application/vnd.github+json" \
+              "$api/issues?state=open&per_page=100" \
+              | jq --arg t "$_title" '[.[] | select(.title==$t)] | length')
+            if [ "${_existing:-0}" -eq 0 ]; then
+              _resp=$(curl -sf -X POST \
+                -H "Authorization: token $token" \
+                -H "Accept: application/vnd.github+json" \
+                "$api/issues" \
+                -d "$(jq -n \
+                  --arg title "$_title" \
+                  --arg body "$_body" \
+                  --argjson labels "$_labels" \
+                  '{title:$title,body:$body,labels:$labels}')")
+              _url=$(printf '%s' "$_resp" | jq -r '.html_url')
+              echo "$_url" >> "$urls_file"
+              echo $(($(cat "$count_file") + 1)) > "$count_file"
+              echo "Created: $_url"
+            else
+              echo "Skipped duplicate: $_title"
+            fi
+          }
+
+          # --- gitleaks ---
+          if [ -f gitleaks-report.json ] && [ "$(jq 'length' gitleaks-report.json)" -gt 0 ]; then
+            jq -c '.[]' gitleaks-report.json | while IFS= read -r item; do
+              rule=$(printf '%s' "$item" | jq -r '.RuleID // .rule // "secret"')
+              fpath=$(printf '%s' "$item" | jq -r '.File // .path // ""')
+              _title="Secret detected: $rule in $fpath"
+              _body=$(jq -n --argjson d "$item" '{"source":"gitleaks","details":$d}' | jq -r tostring)
+              create_issue "$_title" "$_body" '["security","secrets","gitleaks"]'
+            done
+          fi
+
+          # --- npm audit ---
+          if [ -f npm-audit.json ] && jq -e '.vulnerabilities | length > 0' npm-audit.json >/dev/null 2>&1; then
+            jq -c '.vulnerabilities | to_entries[]' npm-audit.json | while IFS= read -r entry; do
+              pkg=$(printf '%s' "$entry" | jq -r '.key')
+              severity=$(printf '%s' "$entry" | jq -r '.value.severity // "unknown"')
+              via=$(printf '%s' "$entry" | jq -r '[.value.via[]? | if type=="string" then . else .title end] | join(", ")')
+              _title="npm audit: $pkg ($severity)"
+              _body=$(jq -n --arg p "$pkg" --arg s "$severity" --arg v "$via" \
+                '{"source":"npm-audit","package":$p,"severity":$s,"via":$v}' | jq -r tostring)
+              create_issue "$_title" "$_body" '["security","dependencies","npm-audit"]'
+            done
+          fi
+
+          # --- pip-audit ---
+          if [ -f pip-audit.json ] && jq -e '.dependencies | map(.vulns | length) | add > 0' pip-audit.json >/dev/null 2>&1; then
+            jq -c '.dependencies[] | select(.vulns | length > 0) | . as $dep | .vulns[] | {dep:$dep.name,ver:$dep.version,id:.id,fix:.fix_versions,desc:.description}' pip-audit.json \
+              | while IFS= read -r vuln; do
+                pkg=$(printf '%s' "$vuln" | jq -r '.dep')
+                vid=$(printf '%s' "$vuln" | jq -r '.id')
+                desc=$(printf '%s' "$vuln" | jq -r '.desc // "no description"')
+                _title="pip-audit: $pkg - $vid"
+                _body=$(jq -n --argjson d "$vuln" '{"source":"pip-audit","details":$d}' | jq -r tostring)
+                create_issue "$_title" "$_body" '["security","dependencies","pip-audit"]'
+              done
+          fi
+
+          # --- CodeQL alerts ---
+          alerts=$(curl -sf \
+            -H "Authorization: token $token" \
+            -H "Accept: application/vnd.github+json" \
+            "$api/code-scanning/alerts?tool_name=CodeQL&state=open&per_page=100")
+          if [ "$(printf '%s' "$alerts" | jq 'if type=="array" then length else 0 end')" -gt 0 ]; then
+            printf '%s' "$alerts" | jq -c '.[]' | while IFS= read -r alert; do
+              rule=$(printf '%s' "$alert" | jq -r '.rule.id // "codeql"')
+              fpath=$(printf '%s' "$alert" | jq -r '.most_recent_instance.location.path // ""')
+              _title="CodeQL: $rule in $fpath"
+              _body=$(jq -n --argjson d "$alert" '{"source":"codeql","alert":$d}' | jq -r tostring)
+              create_issue "$_title" "$_body" '["security","codeql","code-scanning"]'
+            done
+          fi
+
+          # --- Summary and exit ---
+          total=$(cat "$count_file")
+          echo "Total new issues created: $total"
+          if [ "$total" -gt 0 ]; then
+            all_urls=$(cat "$urls_file" | tr '\n' ' ')
+            summary_body=$(jq -n --argjson n "$total" --arg u "$all_urls" \
+              '{"total_findings":$n,"issues":$u}' | jq -r tostring)
+            create_issue "Security scan summary: $total new findings" "$summary_body" '["security","scan-summary"]'
+            echo "Workflow failing due to $total finding(s)."
+            exit 1
+          else
+            echo "No new findings — all clear."
+          fi
