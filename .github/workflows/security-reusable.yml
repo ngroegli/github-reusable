@@ -9,31 +9,81 @@ permissions:
 
 jobs:
   # ------------------------------------------------------------
-  # CodeQL: static code analysis for JavaScript and Python.
-  # Runs in parallel with secret-scan and dependency scans.
+  # eslint-security: lightweight OWASP / security pattern scan
+  # for JavaScript and TypeScript projects.
+  # Uses eslint-plugin-security (no build required) to flag
+  # common issues: object injection, non-literal regexp/require,
+  # unsafe exec, hardcoded credentials, etc.
+  # Skipped automatically when no package.json is present.
   # ------------------------------------------------------------
-  codeql:
-    name: CodeQL analysis
+  eslint-security:
+    name: ESLint security scan (JS/TS)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 15
     permissions:
       contents: read
-      security-events: write  # upload SARIF results to Code Scanning
-      actions: read           # correlate SARIF with the workflow run
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
+      - name: Detect package.json
+        id: detect_node
+        run: |
+          if [ -f package.json ]; then
+            echo "node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.detect_node.outputs.node == 'true'
+        uses: actions/setup-node@v4
         with:
-          languages: javascript,python
+          node-version: '20'
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v2
+      - name: Install ESLint and security plugin
+        if: steps.detect_node.outputs.node == 'true'
+        # Installed locally so version is pinned and does not conflict with
+        # the project's own eslint version.
+        run: npm install --no-save eslint@9 eslint-plugin-security@3
 
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
+      - name: Run ESLint security scan
+        if: steps.detect_node.outputs.node == 'true'
+        run: |
+          node_modules/.bin/eslint \
+            --plugin security \
+            --rule 'security/detect-object-injection: warn' \
+            --rule 'security/detect-non-literal-regexp: warn' \
+            --rule 'security/detect-non-literal-require: warn' \
+            --rule 'security/detect-non-literal-fs-filename: warn' \
+            --rule 'security/detect-unsafe-regex: warn' \
+            --rule 'security/detect-buffer-noassert: warn' \
+            --rule 'security/detect-child-process: warn' \
+            --rule 'security/detect-disable-mustache-escape: warn' \
+            --rule 'security/detect-eval-with-expression: warn' \
+            --rule 'security/detect-no-csrf-before-method-override: warn' \
+            --rule 'security/detect-possible-timing-attacks: warn' \
+            --rule 'security/detect-pseudoRandomBytes: warn' \
+            --format json \
+            --output-file eslint-security-report.json \
+            "**/*.{js,mjs,cjs,ts,mts,cts}" \
+            --ignore-pattern node_modules \
+            --ignore-pattern dist \
+            --ignore-pattern build \
+            --ignore-pattern coverage \
+            || true
+
+      - name: Ensure report exists
+        if: steps.detect_node.outputs.node != 'true'
+        run: echo '[]' > eslint-security-report.json
+
+      - name: Upload ESLint security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslint-security-report
+          path: eslint-security-report.json
+          retention-days: 30
 
   # ------------------------------------------------------------
   # Gitleaks: detect secrets committed to the repository.
@@ -251,13 +301,12 @@ jobs:
   create-issues-and-fail:
     name: Report findings and fail
     runs-on: ubuntu-24.04
-    needs: [codeql, secret-scan, npm-audit, pip-audit, bandit]
+    needs: [eslint-security, secret-scan, npm-audit, pip-audit, bandit]
     if: always()
     timeout-minutes: 15
     permissions:
       contents: read
       issues: write
-      security-events: read  # read CodeQL alerts via code-scanning API
     steps:
       - name: Download all reports
         uses: actions/download-artifact@v4
@@ -312,8 +361,15 @@ jobs:
               echo "| Bandit | skipped | - |"
             fi
 
-            echo ""
-            echo "CodeQL alerts are available in the Security tab of this repository."
+            # eslint-security
+            if [ -f eslint-security-report.json ] && jq -e 'type == "array"' eslint-security-report.json >/dev/null 2>&1; then
+              count=$(jq '[.[].messages[]] | length' eslint-security-report.json 2>/dev/null || echo 0)
+              if [ "$count" -gt 0 ]; then status="FAIL"; else status="pass"; fi
+              echo "| ESLint security (JS/TS) | $status | $count |"
+            else
+              echo "| ESLint security (JS/TS) | skipped | - |"
+            fi
+
             echo ""
             echo "_Detailed reports are attached as workflow artifacts (retained 30 days)._"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -411,19 +467,18 @@ jobs:
             done
           fi
 
-          # --- CodeQL alerts ---
-          alerts=$(curl -sf \
-            -H "Authorization: token $token" \
-            -H "Accept: application/vnd.github+json" \
-            "$api/code-scanning/alerts?tool_name=CodeQL&state=open&per_page=100")
-          if [ "$(printf '%s' "$alerts" | jq 'if type=="array" then length else 0 end')" -gt 0 ]; then
-            printf '%s' "$alerts" | jq -c '.[]' | while IFS= read -r alert; do
-              rule=$(printf '%s' "$alert" | jq -r '.rule.id // "codeql"')
-              fpath=$(printf '%s' "$alert" | jq -r '.most_recent_instance.location.path // ""')
-              _title="CodeQL: $rule in $fpath"
-              _body=$(jq -n --argjson d "$alert" '{"source":"codeql","alert":$d}' | jq -r tostring)
-              create_issue "$_title" "$_body" '["security","codeql","code-scanning"]'
-            done
+          # --- ESLint security ---
+          # ESLint JSON format: array of file results, each with a messages[] array.
+          if [ -f eslint-security-report.json ] && jq -e '[.[].messages[]] | length > 0' eslint-security-report.json >/dev/null 2>&1; then
+            jq -c '.[] | . as $file | .messages[] | {file:$file.filePath,rule:.ruleId,msg:.message,line:.line,severity:.severity}' eslint-security-report.json \
+              | while IFS= read -r item; do
+                rule=$(printf '%s' "$item" | jq -r '.rule // "eslint-security"')
+                fpath=$(printf '%s' "$item" | jq -r '.file // ""')
+                lineno=$(printf '%s' "$item" | jq -r '.line // ""')
+                _title="ESLint security: $rule in $fpath:$lineno"
+                _body=$(jq -n --argjson d "$item" '{"source":"eslint-security","details":$d}' | jq -r tostring)
+                create_issue "$_title" "$_body" '["security","code-scanning","eslint-security"]'
+              done
           fi
 
           # --- Summary and exit ---

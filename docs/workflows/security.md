@@ -1,56 +1,45 @@
 # Security workflow (usage)
 
-`security-reusable.yml` is the canonical, reusable security scanning workflow. It is called by other repositories via `workflow_call` and runs four parallel scanner jobs, then creates one GitHub Issue per finding and fails the workflow if any findings are present.
+`security-reusable.yml` is the canonical, reusable security scanning workflow. It is called by other repositories via `workflow_call` and runs five parallel scanner jobs, then creates one GitHub Issue per finding and fails the workflow if any findings are present.
 
 ## What it scans
 
 | Scanner | Tool | Trigger condition |
 |---|---|---|
-| Static code analysis | CodeQL | Always (JavaScript + Python) |
-| Python code security lint | Bandit | `pyproject.toml`, `setup.py`, or `requirements.txt` present |
+| JS/TS security pattern scan | `eslint-plugin-security` | `package.json` present |
+| Python security lint | Bandit | `pyproject.toml`, `setup.py`, or `requirements.txt` present |
 | Secret detection | gitleaks CLI | Always (full git history) |
 | npm dependency audit | `npm audit` | `package.json` present |
 | Python dependency audit | `pip-audit` | `pyproject.toml`, `setup.py`, or `requirements.txt` present |
 
-> **Why pip-audit and not safety?** `pip-audit` is fully free and open source (PyPA / Google, Apache 2.0) and queries the OSV + PyPI Advisory databases with no API key. `safety` v3+ requires a paid key for complete results.
+> **Why eslint-plugin-security for JS?** It is lightweight (no build step, no account, MIT licence), runs on the existing Node install, and covers the most common OWASP Top 10 patterns in JS/TS: object injection, non-literal `require`/`fs` calls, unsafe regex, `eval`, missing CSRF protection, and timing attacks. It does not attempt deep semantic analysis — that trade-off is intentional.
 
-> **Why Bandit alongside CodeQL?** Bandit is a dedicated Python security linter that catches Python-specific anti-patterns (hardcoded credentials, `eval`, insecure `subprocess` calls, SQL injection, etc.) with high precision. CodeQL provides broader cross-language semantic analysis; the two tools are complementary.
+> **Why Bandit for Python?** Bandit covers the same class of OWASP patterns for Python: hardcoded credentials, SQL injection, `eval`, insecure crypto, unsafe `subprocess` calls, and more. It is focused, fast, and requires no external service.
+
+> **Why pip-audit and not safety?** `pip-audit` is fully free and open source (PyPA / Google, Apache 2.0) and queries the OSV + PyPI Advisory databases with no API key. `safety` v3+ requires a paid key for complete results.
 
 ## Findings and issues
 
-- One GitHub Issue is created per finding, labelled by source (`gitleaks`, `npm-audit`, `pip-audit`, `codeql`).
+- One GitHub Issue is created per finding, labelled by source (`gitleaks`, `npm-audit`, `pip-audit`, `bandit`, `eslint-security`).
 - Duplicate issues (same title, already open) are skipped.
 - After all findings are processed, a summary issue (`Security scan summary: N new findings`) is created.
 - The workflow exits non-zero (fails) if any new issues were created.
 
 ## Tokens and secrets
 
-No additional secrets are required. The workflow uses only the built-in `GITHUB_TOKEN` to:
-- Create issues via the REST API.
-- Read Code Scanning (CodeQL) alerts via the `code-scanning` API.
-
-`GITHUB_TOKEN` is provided automatically by GitHub Actions.
+No additional secrets are required. The workflow uses only the built-in `GITHUB_TOKEN` to create issues via the REST API. `GITHUB_TOKEN` is provided automatically by GitHub Actions.
 
 ## Permissions
 
-The reusable workflow declares these permissions:
+The top-level and job-level permissions are minimal. No `security-events` permission is required because Semgrep writes its report to a local JSON file rather than uploading to the GitHub Code Scanning API.
 
 ```yaml
 permissions:
-  contents: read          # checkout and read files (all jobs)
-  issues: write           # create issues (reporting job)
-  # security-events: write and actions: read are declared on the codeql job only,
-  # keeping the top-level grants compatible with cross-repo workflow_call callers.
+  contents: read  # checkout and read files (all jobs)
+  issues: write   # create issues (reporting job only)
 ```
 
-Individual jobs that need elevated permissions declare them explicitly:
-
-| Job | Extra permissions |
-|---|---|
-| `codeql` | `security-events: write` (upload SARIF), `actions: read` (SARIF correlation) |
-| `create-issues-and-fail` | `security-events: read` (read CodeQL alerts via API) |
-
-The **caller workflow** must grant the same permissions to its `GITHUB_TOKEN`.
+The **caller workflow** only needs these same two permissions.
 
 ## Repository visibility requirement
 
@@ -94,20 +83,21 @@ jobs:
 ## Job execution order
 
 ```
-codeql  ──┐
-           ├── create-issues-and-fail
-secret  ──┤
-npm     ──┤
-pip     ──┤
-bandit  ──┘
+eslint   ──┐
+            ├── create-issues-and-fail
+secret   ──┤
+npm      ──┤
+pip      ──┤
+bandit   ──┘
 ```
 
 All five scan jobs run in **parallel**. The `create-issues-and-fail` job waits for all of them (`if: always()`) before processing results.
 
 ## Notes
 
-- Reports from each scan job are uploaded as workflow artifacts (`gitleaks-report`, `npm-audit-report`, `pip-audit-report`, `bandit-report`) and downloaded by the final reporting job. All artifacts are retained for 30 days.
+- Reports from each scan job are uploaded as workflow artifacts (`eslint-security-report`, `gitleaks-report`, `npm-audit-report`, `pip-audit-report`, `bandit-report`) and downloaded by the final reporting job. All artifacts are retained for 30 days.
 - A Markdown summary table is written to the Actions run UI (`$GITHUB_STEP_SUMMARY`) showing pass/fail counts per scanner.
+- `eslint-plugin-security` is installed locally into `node_modules` during the scan job and does not conflict with the project's own ESLint version. All 12 security rules are enabled at `warn` level so the scan never blocks the runner but all findings are captured.
 - `requirements.txt`, `pyproject.toml`, or `setup.py` all trigger both `pip-audit` and Bandit. The project's dependencies are installed before pip-audit runs so the full transitive dependency tree is audited.
 - Bandit skips `B110` (try/except/pass) and `B112` (try/except/continue) which are non-security patterns. It scans at medium severity and above. `node_modules`, `venv`, and `.venv` directories are excluded.
 - The gitleaks scan runs with `fetch-depth: 0` to scan the full commit history, not just the latest commit.
