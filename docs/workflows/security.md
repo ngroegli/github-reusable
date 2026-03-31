@@ -7,11 +7,14 @@
 | Scanner | Tool | Trigger condition |
 |---|---|---|
 | Static code analysis | CodeQL | Always (JavaScript + Python) |
+| Python code security lint | Bandit | `pyproject.toml`, `setup.py`, or `requirements.txt` present |
 | Secret detection | gitleaks CLI | Always (full git history) |
 | npm dependency audit | `npm audit` | `package.json` present |
-| Python dependency audit | `pip-audit` | `pyproject.toml` or `setup.py` present |
+| Python dependency audit | `pip-audit` | `pyproject.toml`, `setup.py`, or `requirements.txt` present |
 
 > **Why pip-audit and not safety?** `pip-audit` is fully free and open source (PyPA / Google, Apache 2.0) and queries the OSV + PyPI Advisory databases with no API key. `safety` v3+ requires a paid key for complete results.
+
+> **Why Bandit alongside CodeQL?** Bandit is a dedicated Python security linter that catches Python-specific anti-patterns (hardcoded credentials, `eval`, insecure `subprocess` calls, SQL injection, etc.) with high precision. CodeQL provides broader cross-language semantic analysis; the two tools are complementary.
 
 ## Findings and issues
 
@@ -34,9 +37,10 @@ The reusable workflow declares these permissions:
 
 ```yaml
 permissions:
-  contents: read      # checkout and read files
-  issues: write       # create issues
-  security-events: read  # read CodeQL code-scanning alerts
+  contents: read          # checkout and read files
+  issues: write           # create issues
+  security-events: write  # CodeQL: upload SARIF results to Code Scanning
+  actions: read           # CodeQL: read workflow run metadata for SARIF correlation
 ```
 
 The **caller workflow** must grant the same permissions to its `GITHUB_TOKEN`.
@@ -59,15 +63,23 @@ Create `.github/workflows/security.yml` in your repository:
 name: Security scan
 
 on:
+  # Scan on every push and pull request to main.
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # Weekly scheduled scan (every Monday at 02:00 UTC) to catch
+  # newly published vulnerabilities in unchanged code.
+  schedule:
+    - cron: "0 2 * * 1"
+  # Allow manual triggering from the Actions UI.
+  workflow_dispatch:
 
 permissions:
   contents: read
   issues: write
-  security-events: read
+  security-events: write
+  actions: read
 
 jobs:
   security:
@@ -77,17 +89,20 @@ jobs:
 ## Job execution order
 
 ```
-codeql ──┐
-         ├── create-issues-and-fail
-secret ──┤
-npm    ──┤
-pip    ──┘
+codeql  ──┐
+           ├── create-issues-and-fail
+secret  ──┤
+npm     ──┤
+pip     ──┤
+bandit  ──┘
 ```
 
-All four scan jobs run in **parallel**. The `create-issues-and-fail` job waits for all of them (`if: always()`) before processing results.
+All five scan jobs run in **parallel**. The `create-issues-and-fail` job waits for all of them (`if: always()`) before processing results.
 
 ## Notes
 
-- Reports from each scan job are uploaded as workflow artifacts (`gitleaks-report`, `npm-audit-report`, `pip-audit-report`) and downloaded by the final reporting job.
-- `requirements.txt` alone does **not** trigger `pip-audit` — it is treated as a runtime/dev-deps file, not a package descriptor. Add `pyproject.toml` or `setup.py` to enable Python scanning.
+- Reports from each scan job are uploaded as workflow artifacts (`gitleaks-report`, `npm-audit-report`, `pip-audit-report`, `bandit-report`) and downloaded by the final reporting job. All artifacts are retained for 30 days.
+- A Markdown summary table is written to the Actions run UI (`$GITHUB_STEP_SUMMARY`) showing pass/fail counts per scanner.
+- `requirements.txt`, `pyproject.toml`, or `setup.py` all trigger both `pip-audit` and Bandit. The project's dependencies are installed before pip-audit runs so the full transitive dependency tree is audited.
+- Bandit skips `B110` (try/except/pass) and `B112` (try/except/continue) which are non-security patterns. It scans at medium severity and above. `node_modules`, `venv`, and `.venv` directories are excluded.
 - The gitleaks scan runs with `fetch-depth: 0` to scan the full commit history, not just the latest commit.
