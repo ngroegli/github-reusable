@@ -37,11 +37,18 @@ The reusable workflow declares these permissions:
 
 ```yaml
 permissions:
-  contents: read          # checkout and read files
-  issues: write           # create issues
-  security-events: write  # CodeQL: upload SARIF results to Code Scanning
-  actions: read           # CodeQL: read workflow run metadata for SARIF correlation
+  contents: read          # checkout and read files (all jobs)
+  issues: write           # create issues (reporting job)
+  # security-events: write and actions: read are declared on the codeql job only,
+  # keeping the top-level grants compatible with cross-repo workflow_call callers.
 ```
+
+Individual jobs that need elevated permissions declare them explicitly:
+
+| Job | Extra permissions |
+|---|---|
+| `codeql` | `security-events: write` (upload SARIF), `actions: read` (SARIF correlation) |
+| `create-issues-and-fail` | `security-events: read` (read CodeQL alerts via API) |
 
 The **caller workflow** must grant the same permissions to its `GITHUB_TOKEN`.
 
@@ -78,8 +85,6 @@ on:
 permissions:
   contents: read
   issues: write
-  security-events: write
-  actions: read
 
 jobs:
   security:
