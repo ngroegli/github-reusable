@@ -213,9 +213,20 @@ jobs:
         if: steps.detect_py.outputs.python == 'true'
         # Install the project's own deps so pip-audit audits the full resolved
         # dependency tree (including transitives), not just the declared names.
+        # The editable install is best-effort: some projects require build tools
+        # not present on the runner. Failure is logged and reported rather than
+        # silently swallowed, but does not abort the step — pip-audit will still
+        # run against the declared deps installed from requirements.txt.
         run: |
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install -e . --no-deps 2>/dev/null || true; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            pip install -e . --no-deps 2>&1 | tee pip-editable-install.log || {
+              echo "Warning: editable install failed — pip-audit will scan declared deps only."
+              echo "See pip-editable-install.log for details."
+            }
+          fi
 
       - name: Run pip-audit
         if: steps.detect_py.outputs.python == 'true'
