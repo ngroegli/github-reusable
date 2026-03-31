@@ -397,6 +397,9 @@ jobs:
           count_file=$(mktemp)
           echo 0 > "$count_file"
           urls_file=$(mktemp)
+          # Temp file for jq output — avoids piping into while, which would run
+          # the loop body in a subshell and make count_file writes invisible here.
+          items_file=$(mktemp)
 
           # Helper: create one issue if title not already open; append url to urls_file
           create_issue() {
@@ -429,18 +432,20 @@ jobs:
 
           # --- gitleaks ---
           if [ -f gitleaks-report.json ] && [ "$(jq 'length' gitleaks-report.json)" -gt 0 ]; then
-            jq -c '.[]' gitleaks-report.json | while IFS= read -r item; do
+            jq -c '.[]' gitleaks-report.json > "$items_file"
+            while IFS= read -r item; do
               rule=$(printf '%s' "$item" | jq -r '.RuleID // .rule // "secret"')
               fpath=$(printf '%s' "$item" | jq -r '.File // .path // ""')
               _title="Secret detected: $rule in $fpath"
               _body=$(jq -n --argjson d "$item" '{"source":"gitleaks","details":$d}' | jq -r tostring)
               create_issue "$_title" "$_body" '["security","secrets","gitleaks"]'
-            done
+            done < "$items_file"
           fi
 
           # --- npm audit ---
           if [ -f npm-audit.json ] && jq -e '.vulnerabilities | length > 0' npm-audit.json >/dev/null 2>&1; then
-            jq -c '.vulnerabilities | to_entries[]' npm-audit.json | while IFS= read -r entry; do
+            jq -c '.vulnerabilities | to_entries[]' npm-audit.json > "$items_file"
+            while IFS= read -r entry; do
               pkg=$(printf '%s' "$entry" | jq -r '.key')
               severity=$(printf '%s' "$entry" | jq -r '.value.severity // "unknown"')
               via=$(printf '%s' "$entry" | jq -r '[.value.via[]? | if type=="string" then . else .title end] | join(", ")')
@@ -448,25 +453,26 @@ jobs:
               _body=$(jq -n --arg p "$pkg" --arg s "$severity" --arg v "$via" \
                 '{"source":"npm-audit","package":$p,"severity":$s,"via":$v}' | jq -r tostring)
               create_issue "$_title" "$_body" '["security","dependencies","npm-audit"]'
-            done
+            done < "$items_file"
           fi
 
           # --- pip-audit ---
           if [ -f pip-audit.json ] && jq -e '.dependencies | map(.vulns | length) | add > 0' pip-audit.json >/dev/null 2>&1; then
-            jq -c '.dependencies[] | select(.vulns | length > 0) | . as $dep | .vulns[] | {dep:$dep.name,ver:$dep.version,id:.id,fix:.fix_versions,desc:.description}' pip-audit.json \
-              | while IFS= read -r vuln; do
-                pkg=$(printf '%s' "$vuln" | jq -r '.dep')
-                vid=$(printf '%s' "$vuln" | jq -r '.id')
-                desc=$(printf '%s' "$vuln" | jq -r '.desc // "no description"')
-                _title="pip-audit: $pkg - $vid"
-                _body=$(jq -n --argjson d "$vuln" '{"source":"pip-audit","details":$d}' | jq -r tostring)
-                create_issue "$_title" "$_body" '["security","dependencies","pip-audit"]'
-              done
+            jq -c '.dependencies[] | select(.vulns | length > 0) | . as $dep | .vulns[] | {dep:$dep.name,ver:$dep.version,id:.id,fix:.fix_versions,desc:.description}' pip-audit.json > "$items_file"
+            while IFS= read -r vuln; do
+              pkg=$(printf '%s' "$vuln" | jq -r '.dep')
+              vid=$(printf '%s' "$vuln" | jq -r '.id')
+              desc=$(printf '%s' "$vuln" | jq -r '.desc // "no description"')
+              _title="pip-audit: $pkg - $vid"
+              _body=$(jq -n --argjson d "$vuln" '{"source":"pip-audit","details":$d}' | jq -r tostring)
+              create_issue "$_title" "$_body" '["security","dependencies","pip-audit"]'
+            done < "$items_file"
           fi
 
           # --- Bandit ---
           if [ -f bandit-report.json ] && jq -e '.results | length > 0' bandit-report.json >/dev/null 2>&1; then
-            jq -c '.results[]' bandit-report.json | while IFS= read -r item; do
+            jq -c '.results[]' bandit-report.json > "$items_file"
+            while IFS= read -r item; do
               test_id=$(printf '%s' "$item" | jq -r '.test_id // "B000"')
               test_name=$(printf '%s' "$item" | jq -r '.test_name // "unknown"')
               severity=$(printf '%s' "$item" | jq -r '.issue_severity // "MEDIUM"')
@@ -475,21 +481,21 @@ jobs:
               _title="Bandit: $test_id $test_name ($severity) in $fpath:$lineno"
               _body=$(jq -n --argjson d "$item" '{"source":"bandit","details":$d}' | jq -r tostring)
               create_issue "$_title" "$_body" '["security","code-scanning","bandit"]'
-            done
+            done < "$items_file"
           fi
 
           # --- ESLint security ---
           # ESLint JSON format: array of file results, each with a messages[] array.
           if [ -f eslint-security-report.json ] && jq -e '[.[].messages[]] | length > 0' eslint-security-report.json >/dev/null 2>&1; then
-            jq -c '.[] | . as $file | .messages[] | {file:$file.filePath,rule:.ruleId,msg:.message,line:.line,severity:.severity}' eslint-security-report.json \
-              | while IFS= read -r item; do
-                rule=$(printf '%s' "$item" | jq -r '.rule // "eslint-security"')
-                fpath=$(printf '%s' "$item" | jq -r '.file // ""')
-                lineno=$(printf '%s' "$item" | jq -r '.line // ""')
-                _title="ESLint security: $rule in $fpath:$lineno"
-                _body=$(jq -n --argjson d "$item" '{"source":"eslint-security","details":$d}' | jq -r tostring)
-                create_issue "$_title" "$_body" '["security","code-scanning","eslint-security"]'
-              done
+            jq -c '.[] | . as $file | .messages[] | {file:$file.filePath,rule:.ruleId,msg:.message,line:.line,severity:.severity}' eslint-security-report.json > "$items_file"
+            while IFS= read -r item; do
+              rule=$(printf '%s' "$item" | jq -r '.rule // "eslint-security"')
+              fpath=$(printf '%s' "$item" | jq -r '.file // ""')
+              lineno=$(printf '%s' "$item" | jq -r '.line // ""')
+              _title="ESLint security: $rule in $fpath:$lineno"
+              _body=$(jq -n --argjson d "$item" '{"source":"eslint-security","details":$d}' | jq -r tostring)
+              create_issue "$_title" "$_body" '["security","code-scanning","eslint-security"]'
+            done < "$items_file"
           fi
 
           # --- Summary and exit ---
