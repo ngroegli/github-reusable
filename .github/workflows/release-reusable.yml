@@ -69,7 +69,7 @@ jobs:
       docker_image: ${{ steps.detect.outputs.docker_image }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Detect project types and resolve version
         id: detect
@@ -114,16 +114,29 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node ${{ inputs.node_version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node_version }}
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build (if present) and create package tarball
+        run: |
+          # Run project build if it defines a build script
+          if npm run | grep -q " build"; then
+            npm run build || true
+          fi
+          mkdir -p dist
+          # Create a packed tarball and move it to dist
+          npm pack >/dev/null 2>&1 || true
+          for f in *.tgz; do
+            [ -f "$f" ] && mv "$f" dist/ || true
+          done
 
       - name: Publish
         env:
@@ -143,10 +156,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python ${{ inputs.python_version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.python_version }}
 
@@ -175,7 +188,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Log in to registry
         env:
@@ -210,10 +223,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download build artefacts (if any)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
         continue-on-error: true
@@ -224,6 +237,7 @@ jobs:
         with:
           tag_name: ${{ needs.detect.outputs.version }}
           generate_release_notes: true
-          files: dist/**/*
+          files: |
+            dist/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
