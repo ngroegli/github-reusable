@@ -35,11 +35,30 @@ The top-level and job-level permissions are minimal. No `security-events` permis
 
 ```yaml
 permissions:
-  contents: read  # checkout and read files (all jobs)
-  issues: write   # create issues (reporting job only)
+  contents: write  # checkout, read files, and commit badge update
+  issues: write    # create issues (reporting job only)
 ```
 
 The **caller workflow** only needs these same two permissions.
+
+## Security badge
+
+After each scan run, the workflow automatically updates a security badge in the calling repo's `README.md` — provided a placeholder comment exists. The badge shows `passing` (green) when no new findings are created, and `failing` (red) when findings exist.
+
+**Add this to your `README.md` once** (the workflow keeps the badge line up to date automatically):
+
+```markdown
+<!-- security-badge -->
+[![Security scan](https://img.shields.io/badge/security-passing-brightgreen)](https://github.com/ngroegli/my-repo/actions/workflows/security.yml)
+```
+
+Replace `ngroegli/my-repo` with your own `owner/repo`.
+
+If the placeholder is absent, the badge step is a no-op — nothing is committed and no error is raised. The step summary always shows the correct badge snippet regardless.
+
+> The badge uses [shields.io](https://shields.io) static badges. No API key or additional setup is needed.
+
+---
 
 ## Repository visibility requirement
 

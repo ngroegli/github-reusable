@@ -316,7 +316,7 @@ jobs:
     if: always()
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
       issues: write
     steps:
       - name: Download all reports
@@ -511,3 +511,62 @@ jobs:
           else
             echo "No new findings — all clear."
           fi
+
+      - name: Update security badge in README
+        # Rewrites the shields.io security badge line in the calling repo's
+        # README.md after each scan run, reflecting the current pass/fail state.
+        # The badge placeholder must exist in README.md:
+        #   <!-- security-badge -->
+        #   ![Security](https://img.shields.io/badge/security-...)
+        # If the placeholder is absent the step is a no-op (no commit made).
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        shell: sh
+        run: |
+          # Determine overall scan outcome from the step summary table written earlier.
+          # A "FAIL" in the summary means at least one scanner found issues.
+          if grep -q "FAIL" "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
+            label="failing"
+            color="critical"
+          else
+            label="passing"
+            color="brightgreen"
+          fi
+
+          BADGE="[![Security scan](https://img.shields.io/badge/security-${label}-${color})](https://github.com/${REPO}/actions/workflows/security.yml)"
+          PLACEHOLDER="<!-- security-badge -->"
+
+          # Write badge snippet to step summary for first-time setup
+          {
+            echo ""
+            echo "## Security badge"
+            echo ""
+            echo "Add this to your \`README.md\` to display the security scan badge:"
+            echo ""
+            echo '```markdown'
+            echo "${PLACEHOLDER}"
+            echo "${BADGE}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Only commit if the placeholder exists in README.md
+          if ! grep -qF "${PLACEHOLDER}" README.md 2>/dev/null; then
+            echo "No badge placeholder found in README.md — skipping badge commit."
+            exit 0
+          fi
+
+          # Replace the line immediately after the placeholder
+          awk -v badge="${BADGE}" -v marker="${PLACEHOLDER}" '
+            $0 == marker { print; getline; print badge; next }
+            { print }
+          ' README.md > README.md.tmp && mv README.md.tmp README.md
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet && echo "Badge already up to date." && exit 0
+          git commit -m "chore: update security badge [skip ci]"
+          git push
