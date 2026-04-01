@@ -59,9 +59,9 @@ jobs:
           is_python=false
           is_docker=false
 
-          [ -f package.json ]                              && is_node=true
-          { [ -f pyproject.toml ] || [ -f setup.py ]; }   && is_python=true
-          [ -f Dockerfile ]                                && is_docker=true
+          [ -f package.json ]                                       && is_node=true
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then is_python=true; fi
+          [ -f Dockerfile ]                                        && is_docker=true
 
           echo "version=$version"       >> "$GITHUB_OUTPUT"
           echo "is_node=$is_node"       >> "$GITHUB_OUTPUT"
