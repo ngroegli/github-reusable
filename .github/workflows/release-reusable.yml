@@ -241,3 +241,49 @@ jobs:
             dist/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update version badge in README
+        # Rewrites the shields.io release badge line in README.md so the
+        # badge always shows the version that was just released.
+        # The badge placeholder must exist in README.md:
+        #   <!-- release-badge -->
+        #   ![Latest release](https://img.shields.io/github/v/release/...)
+        # If the placeholder is absent the step is a no-op (no commit made).
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+          REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BADGE="[![Latest release](https://img.shields.io/github/v/release/${REPO}?label=release)](https://github.com/${REPO}/releases/latest)"
+          PLACEHOLDER="<!-- release-badge -->"
+
+          # Write badge URL to step summary regardless
+          {
+            echo "## Badge"
+            echo ""
+            echo "Add this to your \`README.md\` to display the version badge:"
+            echo ""
+            echo '```markdown'
+            echo "${PLACEHOLDER}"
+            echo "${BADGE}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Only commit if the placeholder exists in README.md
+          if ! grep -qF "${PLACEHOLDER}" README.md 2>/dev/null; then
+            echo "No badge placeholder found in README.md — skipping badge commit."
+            exit 0
+          fi
+
+          # Replace the line immediately after the placeholder
+          awk -v badge="${BADGE}" -v marker="${PLACEHOLDER}" '
+            $0 == marker { print; getline; print badge; next }
+            { print }
+          ' README.md > README.md.tmp && mv README.md.tmp README.md
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet && echo "Badge already up to date." && exit 0
+          git commit -m "chore: update release badge to ${VERSION} [skip ci]"
+          git push

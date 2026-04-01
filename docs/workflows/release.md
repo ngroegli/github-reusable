@@ -94,6 +94,25 @@ All three publish jobs run **in parallel** after `detect` finishes. The `github-
 
 ---
 
+## Version badge
+
+After each release, the workflow automatically updates a version badge in the calling repo's `README.md` — provided a placeholder comment exists.
+
+**Add this to your `README.md` once** (the workflow keeps the badge line up to date automatically):
+
+```markdown
+<!-- release-badge -->
+[![Latest release](https://img.shields.io/github/v/release/ngroegli/my-repo?label=release)](https://github.com/ngroegli/my-repo/releases/latest)
+```
+
+Replace `ngroegli/my-repo` with your own `owner/repo`.
+
+If the placeholder is absent, the badge step is a no-op — nothing is committed and no error is raised. The step summary always shows the correct badge snippet regardless.
+
+> The badge is powered by [shields.io](https://shields.io) and reflects the latest GitHub Release. No API key or additional setup is needed.
+
+---
+
 ## Notes
 
 - The Docker image is tagged with both the version tag (e.g. `v1.2.3`) and `latest`.
