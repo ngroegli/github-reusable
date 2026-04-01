@@ -60,7 +60,15 @@ jobs:
           is_docker=false
 
           [ -f package.json ]                                       && is_node=true
-          if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f requirements.txt ]; then is_python=true; fi
+          # Only treat as a buildable Python package when a proper build
+          # descriptor exists. requirements.txt alone means an application,
+          # not a distributable package — python -m build would fail without
+          # a [project] or [build-system] table.
+          if [ -f setup.py ]; then
+            is_python=true
+          elif [ -f pyproject.toml ] && grep -qE '^\[(project|build-system)\]' pyproject.toml; then
+            is_python=true
+          fi
           [ -f Dockerfile ]                                        && is_docker=true
 
           echo "version=$version"       >> "$GITHUB_OUTPUT"

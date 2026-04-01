@@ -11,7 +11,7 @@ It automatically detects which project types exist in the calling repository and
 | Project type | Trigger condition | Artifact attached to Release |
 |---|---|---|
 | npm | `package.json` present | `<name>-<version>.tgz` (npm pack tarball) |
-| Python | `pyproject.toml` or `setup.py` present | `<name>-<version>-*.whl` + `<name>-<version>.tar.gz` |
+| Python | `pyproject.toml` (with `[project]` or `[build-system]`) or `setup.py` present | `<name>-<version>-*.whl` + `<name>-<version>.tar.gz` |
 | Docker | `Dockerfile` present | `<repo>-<version>.tar.gz` (docker save image archive) |
 
 ---
