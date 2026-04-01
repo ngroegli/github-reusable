@@ -39,7 +39,7 @@ permissions:
   issues: write    # create issues (reporting job only)
 ```
 
-The **caller workflow** only needs these same two permissions.
+The **caller workflow** must also declare `contents: write`. GitHub enforces that a reusable workflow cannot receive more permissions than the caller grants — if the caller only grants `contents: read`, the reusable workflow's `contents: write` is rejected at parse time.
 
 ## Security badge
 
@@ -91,7 +91,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:
