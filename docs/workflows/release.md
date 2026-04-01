@@ -1,30 +1,24 @@
 # Release workflow (usage)
 
-`release-reusable.yml` is a reusable, callable workflow that automates publishing artifacts and creating a GitHub Release whenever a caller repository pushes a version tag (`v*`).
+`release-reusable.yml` is a reusable, callable workflow that builds downloadable artifacts and creates a GitHub Release whenever a caller repository pushes a version tag (`v*`). Built artifacts are attached directly to the release page so they can be downloaded from the Releases tab.
 
-It automatically detects which artifact types exist in the calling repository and **only runs the relevant publish jobs**:
-
-| Artifact | Trigger condition | Publish target |
-|---|---|---|
-| npm package | `package.json` present | npmjs.com registry |
-| Python package | `pyproject.toml` or `setup.py` present | PyPI via Twine |
-| Docker image | `Dockerfile` present | Docker registry (default: GHCR) |
-| GitHub Release | Always (after other jobs) | GitHub Releases page |
+It automatically detects which project types exist in the calling repository and builds only what is relevant. Publishing to npm, PyPI, or Docker registries is **not** performed — that is the responsibility of each repository's own deploy workflow.
 
 ---
 
-## Required secrets
+## What gets built and attached
 
-Add these in **Settings → Secrets and variables → Actions** of the calling repository. Only add the ones relevant to your artifact type.
-
-| Secret name | When needed | Description |
+| Project type | Trigger condition | Artifact attached to Release |
 |---|---|---|
-| `NPM_TOKEN` | npm projects | Automation token from npmjs.com |
-| `PYPI_TOKEN` | Python projects | API token from pypi.org |
-| `DOCKER_USERNAME` | Docker projects | Registry username (e.g. Docker Hub or GHCR user) |
-| `DOCKER_PASSWORD` | Docker projects | Registry password or personal access token |
+| npm | `package.json` present | `<name>-<version>.tgz` (npm pack tarball) |
+| Python | `pyproject.toml` or `setup.py` present | `<name>-<version>-*.whl` + `<name>-<version>.tar.gz` |
+| Docker | `Dockerfile` present | `<repo>-<version>.tar.gz` (docker save image archive) |
 
-> **Note:** No extra secrets are needed for the GitHub Release step — it uses the built-in `GITHUB_TOKEN`.
+---
+
+## Secrets
+
+No secrets are required. The workflow uses only the built-in `GITHUB_TOKEN`, which GitHub injects automatically into every workflow run.
 
 ---
 
@@ -32,9 +26,8 @@ Add these in **Settings → Secrets and variables → Actions** of the calling r
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `docker_image` | No | `ghcr.io/<calling-repo>` | Full Docker image name, e.g. `ghcr.io/my-org/my-app` |
-| `node_version` | No | `20` | Node.js version used for npm publish |
-| `python_version` | No | `3.12` | Python version used for PyPI publish |
+| `node_version` | No | `20` | Node.js version used to build npm packages |
+| `python_version` | No | `3.12` | Python version used to build Python packages |
 
 ---
 
@@ -47,6 +40,8 @@ workflow was not found
 ```
 
 To resolve this, make `github-reusable` public: **Settings → General → Danger Zone → Change repository visibility → Make public**. The workflows contain no secrets or sensitive logic — they are safe to be public.
+
+---
 
 ## How to call from another repository
 
@@ -62,18 +57,13 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   release:
     uses: ngroegli/github-reusable/.github/workflows/release-reusable.yml@main
     with:
-      docker_image: ghcr.io/ngroegli/my-app   # optional override
-    secrets:
-      npm_token: ${{ secrets.NPM_TOKEN }}
-      pypi_token: ${{ secrets.PYPI_TOKEN }}
-      docker_username: ${{ secrets.DOCKER_USERNAME }}
-      docker_password: ${{ secrets.DOCKER_PASSWORD }}
+      node_version: '22'      # optional
+      python_version: '3.13'  # optional
 ```
 
 > The `push: tags: v*` trigger lives in **your** repository's caller workflow, not in the reusable workflow. This keeps the reusable workflow generic and lets each project choose its own tag pattern.
@@ -84,13 +74,13 @@ jobs:
 
 ```
 detect
-  ├── publish-npm     (skipped if no package.json)
-  ├── publish-pypi    (skipped if no pyproject.toml / setup.py)
-  └── publish-docker  (skipped if no Dockerfile)
+  ├── build-npm     (skipped if no package.json)
+  ├── build-python  (skipped if no pyproject.toml / setup.py)
+  └── build-docker  (skipped if no Dockerfile)
         └── github-release  (always runs if detect succeeded)
 ```
 
-All three publish jobs run **in parallel** after `detect` finishes. The `github-release` job waits for all of them (it still runs even if some were skipped).
+All three build jobs run in parallel after `detect`. The `github-release` job waits for all of them and attaches every artifact they produced.
 
 ---
 
@@ -115,7 +105,7 @@ If the placeholder is absent, the badge step is a no-op — nothing is committed
 
 ## Notes
 
-- The Docker image is tagged with both the version tag (e.g. `v1.2.3`) and `latest`.
 - The GitHub Release is auto-generated from commit messages using `generate_release_notes: true`.
-- `requirements.txt` alone does **not** trigger a PyPI publish — it is treated as a dev-dependencies file, not a publishable package. Add a `pyproject.toml` or `setup.py` to enable Python publishing.
+- The Docker artifact is a `docker save` export — a portable image archive, not a registry push. It can be loaded on any machine with `docker load -i <file>.tar.gz`.
+- Publishing artifacts (npm, PyPI, Docker registries) must be handled in your own repository's deploy workflow, separate from this release workflow.
 - The `softprops/action-gh-release` action is pinned to a specific commit SHA to prevent supply-chain drift.
