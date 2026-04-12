@@ -11,6 +11,12 @@ It automatically detects which project types exist in the calling repository and
 | Project type | Trigger condition | Artifact attached to Release |
 |---|---|---|
 | npm | `package.json` present | `<name>-<version>.tgz` (npm pack tarball) |
+
+> **npm projects:** `npm pack` includes whatever is listed in the `files` field of `package.json`. If `files` is not set, npm packs the entire project tree — including source files. Add a `files` array to control what ends up in the tarball:
+> ```json
+> "files": ["dist/", "lib/"]
+> ```
+> The `build` script (if defined) is always run before packing, so compiled output will be present when `npm pack` runs.
 | Python | `pyproject.toml` (with `[project]` or `[build-system]`) or `setup.py` present | `<name>-<version>-*.whl` + `<name>-<version>.tar.gz` |
 | Docker | `Dockerfile` present | `<repo>-<version>.tar.gz` (docker save image archive) |
 

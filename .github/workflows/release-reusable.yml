@@ -100,17 +100,22 @@ jobs:
 
       - name: Build (if script present)
         run: |
-          if npm run | grep -q " build"; then
+          # npm run lists available scripts; match 'build' as a script name.
+          # Use || true so the step never fails when no build script exists.
+          if npm run --silent 2>/dev/null | grep -qE '^  build$'; then
             npm run build
+          else
+            echo "No build script found — skipping build step."
           fi
 
       - name: Pack tarball
         run: |
+          # npm pack respects the "files" field in package.json.
+          # Add a "files" array to package.json to control what is included,
+          # e.g. "files": ["dist/", "lib/"] to include only compiled output.
+          # Without it, npm pack includes the entire project tree.
           mkdir -p dist
-          npm pack >/dev/null
-          for f in *.tgz; do
-            [ -f "$f" ] && mv "$f" dist/
-          done
+          npm pack --pack-destination dist/ >/dev/null
 
       - name: Upload npm artifact
         uses: actions/upload-artifact@v6
