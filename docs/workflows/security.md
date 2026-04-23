@@ -11,12 +11,18 @@
 | Secret detection | gitleaks CLI | Always (full git history) |
 | npm dependency audit | `npm audit` | `package.json` present |
 | Python dependency audit | `pip-audit` | `pyproject.toml`, `setup.py`, or `requirements.txt` present |
+| C# NuGet dependency audit | `dotnet list package --vulnerable` | `*.csproj` or `*.sln` present |
+| C# static security lint | DevSkim CLI | `*.csproj`, `*.sln`, or `*.cs` present |
 
 > **Why eslint-plugin-security for JS?** It is lightweight (no build step, no account, MIT licence), runs on the existing Node install, and covers the most common OWASP Top 10 patterns in JS/TS: object injection, non-literal `require`/`fs` calls, unsafe regex, `eval`, missing CSRF protection, and timing attacks. It does not attempt deep semantic analysis — that trade-off is intentional.
 
 > **Why Bandit for Python?** Bandit covers the same class of OWASP patterns for Python: hardcoded credentials, SQL injection, `eval`, insecure crypto, unsafe `subprocess` calls, and more. It is focused, fast, and requires no external service.
 
 > **Why pip-audit and not safety?** `pip-audit` is fully free and open source (PyPA / Google, Apache 2.0) and queries the OSV + PyPI Advisory databases with no API key. `safety` v3+ requires a paid key for complete results.
+
+> **Why `dotnet list package --vulnerable` for NuGet?** It is built into the .NET SDK (no extra install), queries the NuGet public advisory database, requires no API key, and works in private repositories. Results include transitive dependencies.
+
+> **Why DevSkim for C#?** DevSkim (Microsoft, Apache 2.0) is a lightweight CLI that flags CWE-mapped security patterns in C# source — hardcoded credentials, weak crypto, SQL injection, unsafe deserialization, and more. It installs as a dotnet global tool, needs no external service, and works in private repos.
 
 ## Findings and issues
 

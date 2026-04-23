@@ -305,6 +305,111 @@ jobs:
           retention-days: 30
 
   # ------------------------------------------------------------
+  # dotnet-vuln: NuGet dependency vulnerability scan for C# projects.
+  # Uses the built-in 'dotnet list package --vulnerable' command which
+  # queries the NuGet public advisory database — no API key required,
+  # fully free, and works in private repositories.
+  # Skipped automatically when no .csproj or .sln file is present.
+  # ------------------------------------------------------------
+  dotnet-vuln:
+    name: dotnet NuGet vulnerability scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Detect .NET project
+        id: detect_dotnet
+        run: |
+          if find . -maxdepth 5 \( -name "*.csproj" -o -name "*.sln" \) | grep -q .; then
+            echo "dotnet=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dotnet=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore NuGet packages
+        if: steps.detect_dotnet.outputs.dotnet == 'true'
+        # Restore is required before 'dotnet list package' can resolve
+        # transitive dependency trees. Failure here is non-fatal — the
+        # audit step will still run against what was restored.
+        run: dotnet restore || true
+
+      - name: Scan for vulnerable NuGet packages
+        if: steps.detect_dotnet.outputs.dotnet == 'true'
+        run: |
+          dotnet list package --vulnerable --include-transitive --format json \
+            > dotnet-vuln.json 2>/dev/null || true
+          # If output is empty or invalid JSON, write an empty result
+          jq -e 'type == "object" and has("projects")' dotnet-vuln.json >/dev/null 2>&1 \
+            || echo '{"version":1,"projects":[]}' > dotnet-vuln.json
+
+      - name: Ensure report exists
+        if: steps.detect_dotnet.outputs.dotnet != 'true'
+        run: echo '{"version":1,"projects":[]}' > dotnet-vuln.json
+
+      - name: Upload dotnet-vuln report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dotnet-vuln-report
+          path: dotnet-vuln.json
+          retention-days: 30
+
+  # ------------------------------------------------------------
+  # devskim: static security linter for C# source code.
+  # Uses Microsoft's DevSkim CLI (OSS, Apache 2.0) to flag insecure
+  # patterns: hardcoded credentials, weak crypto, SQL injection,
+  # unsafe deserialization, and other CWE-mapped issues.
+  # Installed as a dotnet global tool — no external service or API key.
+  # Skipped automatically when no .csproj, .sln, or .cs file is present.
+  # ------------------------------------------------------------
+  devskim:
+    name: DevSkim C# security lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Detect .NET project
+        id: detect_dotnet
+        run: |
+          if find . -maxdepth 5 \( -name "*.csproj" -o -name "*.sln" -o -name "*.cs" \) | grep -q .; then
+            echo "dotnet=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dotnet=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install DevSkim CLI
+        if: steps.detect_dotnet.outputs.dotnet == 'true'
+        run: |
+          dotnet tool install --global Microsoft.CST.DevSkim.CLI
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Run DevSkim
+        if: steps.detect_dotnet.outputs.dotnet == 'true'
+        run: |
+          devskim analyze \
+            --source-code . \
+            --output-file devskim-report.json \
+            --output-format json \
+            --ignore-globs "**/.git/**,**/node_modules/**,**/bin/**,**/obj/**" \
+            || true
+
+      - name: Ensure report exists
+        if: steps.detect_dotnet.outputs.dotnet != 'true'
+        run: echo '[]' > devskim-report.json
+
+      - name: Upload DevSkim report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: devskim-report
+          path: devskim-report.json
+          retention-days: 30
+
+  # ------------------------------------------------------------
   # Aggregate all scanner results, create one issue per finding
   # (deduplicating by title), post a summary issue, and fail
   # the workflow when any findings are present.
@@ -312,7 +417,7 @@ jobs:
   create-issues-and-fail:
     name: Report findings and fail
     runs-on: ubuntu-24.04
-    needs: [eslint-security, secret-scan, npm-audit, pip-audit, bandit]
+    needs: [eslint-security, secret-scan, npm-audit, pip-audit, bandit, dotnet-vuln, devskim]
     if: always()
     timeout-minutes: 15
     permissions:
@@ -379,6 +484,24 @@ jobs:
               echo "| ESLint security (JS/TS) | $status | $count |"
             else
               echo "| ESLint security (JS/TS) | skipped | - |"
+            fi
+
+            # dotnet-vuln
+            if [ -f dotnet-vuln.json ] && jq -e '.projects' dotnet-vuln.json >/dev/null 2>&1; then
+              count=$(jq '[.projects[]? | .frameworks[]? | (.topLevelPackages // [])[], (.transitivePackages // [])[] | select(.vulnerabilities | length > 0)] | length' dotnet-vuln.json 2>/dev/null || echo 0)
+              if [ "$count" -gt 0 ]; then status="FAIL"; else status="pass"; fi
+              echo "| dotnet NuGet audit | $status | $count |"
+            else
+              echo "| dotnet NuGet audit | skipped | - |"
+            fi
+
+            # devskim
+            if [ -f devskim-report.json ] && jq -e 'type == "array"' devskim-report.json >/dev/null 2>&1; then
+              count=$(jq 'length' devskim-report.json 2>/dev/null || echo 0)
+              if [ "$count" -gt 0 ]; then status="FAIL"; else status="pass"; fi
+              echo "| DevSkim (C#) | $status | $count |"
+            else
+              echo "| DevSkim (C#) | skipped | - |"
             fi
 
             echo ""
@@ -495,6 +618,33 @@ jobs:
               _title="ESLint security: $rule in $fpath:$lineno"
               _body=$(jq -n --argjson d "$item" '{"source":"eslint-security","details":$d}' | jq -r tostring)
               create_issue "$_title" "$_body" '["security","code-scanning","eslint-security"]'
+            done < "$items_file"
+          fi
+
+          # --- dotnet NuGet audit ---
+          if [ -f dotnet-vuln.json ] && jq -e '.projects' dotnet-vuln.json >/dev/null 2>&1; then
+            jq -c '.projects[]? | .path as $proj | .frameworks[]? | .framework as $fw | [(.topLevelPackages // [])[], (.transitivePackages // [])[]] | .[] | select(.vulnerabilities | length > 0) | {proj:$proj,fw:$fw,id:.id,ver:.resolvedVersion,vulns:.vulnerabilities}' dotnet-vuln.json > "$items_file"
+            while IFS= read -r item; do
+              pkg=$(printf '%s' "$item" | jq -r '.id')
+              ver=$(printf '%s' "$item" | jq -r '.ver // "unknown"')
+              severity=$(printf '%s' "$item" | jq -r '.vulns[0].severity // "unknown"')
+              _title="dotnet-vuln: $pkg $ver ($severity)"
+              _body=$(jq -n --argjson d "$item" '{"source":"dotnet-vuln","details":$d}' | jq -r tostring)
+              create_issue "$_title" "$_body" '["security","dependencies","dotnet-vuln"]'
+            done < "$items_file"
+          fi
+
+          # --- DevSkim ---
+          if [ -f devskim-report.json ] && jq -e 'type == "array" and length > 0' devskim-report.json >/dev/null 2>&1; then
+            jq -c '.[]' devskim-report.json > "$items_file"
+            while IFS= read -r item; do
+              rule=$(printf '%s' "$item" | jq -r '.rule_id // .ruleId // "devskim"')
+              name=$(printf '%s' "$item" | jq -r '.rule_name // .ruleName // "unknown"')
+              fpath=$(printf '%s' "$item" | jq -r '.file // .filename // ""')
+              lineno=$(printf '%s' "$item" | jq -r '.line_number // .lineNumber // ""')
+              _title="DevSkim: $rule $name in $fpath:$lineno"
+              _body=$(jq -n --argjson d "$item" '{"source":"devskim","details":$d}' | jq -r tostring)
+              create_issue "$_title" "$_body" '["security","code-scanning","devskim"]'
             done < "$items_file"
           fi
 
